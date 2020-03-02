@@ -45,7 +45,7 @@ const size_t dsize = 2 * sizeof(word_t);
 
 size_t min_block_size = 128;   //need to change
 
-static size_t alloc_space = 1024;
+static size_t alloc_space = 2048;
 
 typedef struct block
 {
@@ -116,7 +116,7 @@ static void print_heap()
 static int alloc_memory(size_t asize)
 {
     size_t num_bytes = asize > (alloc_space + dsize) ? asize : (alloc_space + dsize);
-    alloc_space <<= 1;  //扩容采用容量加倍策略
+    // alloc_space <<= 1;  //扩容采用容量加倍策略
     void *p = mem_sbrk(num_bytes);
 
     write_header(p, num_bytes, 0);
