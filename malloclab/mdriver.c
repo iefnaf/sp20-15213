@@ -604,7 +604,7 @@ static int eval_mm_valid(trace_t *trace, int tracenum, range_t **ranges)
         case ALLOC: /* mm_malloc */
 
 	    /* Call the student's malloc */
-	    if ((p = mm_malloc(size)) == NULL) {
+		if ((p = mm_malloc(size)) == NULL) {
 		malloc_error(tracenum, i, "mm_malloc failed.");
 		return 0;
 	    }
