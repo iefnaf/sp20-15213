@@ -1,0 +1,483 @@
+# Cache Lab : Understanding Cache Memories  
+
+## 1. 实验介绍
+
+本次实验分为PartA和PartB两部分。PartA要求写一个小的C程序(大概200~300行)模拟Cache的运行。PartB要求对矩阵转置程序进行优化，将cache miss降到最少。本次实验将帮助你理解Cache的工作机制，以及它对程序性能的影响。
+
+## 2. 背景知识
+
+### 2.1. 动机
+
+首先考虑一个问题：为什么我们需要Cache？没有Cache行不行？  
+
+下图展示了一个没有Cache的计算机系统的简化模型，CPU在执行时需要的指令和数据通过内存总线和系统总线由内存传送到寄存器，再由寄存器送入ALU。
+
+![计算机系统配置](https://s1.ax1x.com/2020/05/22/YOvOfg.png)
+
+下图显示了CPU和主存(DRAM)、磁盘速度上的差距。可以看到，CPU的速度大概是主存的几十倍，如果没有Cache，程序也能正常运行，但是每次CPU需要数据时都需要等待主存把数据传送过来才能继续运行，这样就导致CPU不能发挥出它该有的效率。
+
+![YOvDyR.png](https://s1.ax1x.com/2020/05/22/YOvDyR.png)
+
+而SRAM就弥补了主存与CPU之间的这种代沟。SRAM的速度介于DRAM(主存)和CPU之间，我们把接下来可能会用到的数据放在SRAM(Cache)中，当CPU需要数据时先去查Cache，如果Cache中有(hit)，就不用再去访问主存了，这样就节省了时间。
+
+### 2.2. 局部性原理
+
+上面提到，我们把接下来可能会用到的数据放在Cache中， 那么我们怎么知道接下来可能会用到什么数据呢？答案是局部性原理。局部性原理可以说是计算机系统中非常重要的一个原理，它对计算机的设计产生了重大影响，几乎在计算机系统的各个地方都用到了局部性原理。
+
+局部性原理包括：
+
+* 时间局部性：最近访问的数据可能在不久的将来会再次访问
+
+![YXeWhd.png](https://s1.ax1x.com/2020/05/22/YXeWhd.png)
+
+* 空间局部性：位置相近的数据常常在相近的时间内被访问
+
+![YXeIjP.png](https://s1.ax1x.com/2020/05/22/YXeIjP.png)
+
+根据局部性原理，我们可以把计算机存储系统组织成一个存储山。越靠近山顶，速度越快，但造价越昂贵；越靠近山底，速度越越慢，但造价越便宜。上一层作为下一层的缓冲，保存下一层中的一部分数据。
+
+[![YXuZm6.md.png](https://s1.ax1x.com/2020/05/22/YXuZm6.md.png)](https://imgchr.com/i/YXuZm6)
+
+### 2.3. Cache
+
+Cache的内部组织结构如下图所示。Cache共有S组，每组E行，每行包括一个有效位(valid bit)，一个标签和B比特数据。当E=1时，称为直接映射，当E > 1时，成为E路组相连。  
+
+Cache由硬件管理，硬件在得到内存地址后会将地址划分为三个部分。首先根据组下标选择一个组，然后将地址中的标签与被选中组的每个行中的标签进行比较，如果标签相等，且有效位为1，则Cache命中，再根据块偏移从行中选出相应的数据。
+
+![YXMYFS.png](https://s1.ax1x.com/2020/05/22/YXMYFS.png)
+
+在向内存中写数据时，可能会发生以下几种情况：
+
+* 写命中
+  * write-through：直接写内存
+  * write-back：先写Cache，当该行被替换时再写内存。此时需要一个额外的dirty位。
+* 写不命中
+  * write-allocate：将内存数据读入Cache中，再写Cache
+  * no-write-allocate：直接写内存
+
+Cache 失效的三种原因：
+
+* Cold miss：刚刚使用Cache时Cache为空，此时必然发生Cache miss。
+* Capacity miss：程序最经常使用的那些数据(工作集,working set)超过了Cache的大小
+* Conflict miss：Cache容量足够大，但是不同的数据映射到了同一组，从而造成Cache line反复被替换的现象。
+
+Cache是由硬件管理的，我们普通程序员不必考虑如何去管理Cache，我们需要考虑的是如何利用系统提供给我们的Cache来加速程序的执行。
+
+通常有以下几种方法：
+
+* 重新排列循环次序，提高空间局部性
+* 使用分块技术，提高时间局部性
+
+## 3. Part A
+
+在`csim.c`中写一个Cache，使用LRU替换策略，以`valgrind`的memory trace作为输入，模拟Cache的hit和miss，输出hit、miss和eviction的总数。
+
+因为这部分比较简单，所以直接给出代码。
+
+```c
+#include "cachelab.h"
+#include <getopt.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <stdio.h>
+#include <math.h>
+
+typedef unsigned long int uint64_t;
+
+typedef struct {
+    int valid;
+    int lru;
+    uint64_t tag;
+}cacheLine;
+
+typedef cacheLine* cacheSet;
+typedef cacheSet* Cache;
+
+const char* usage = "Usage: %s [-hv] -s <s> -E <E> -b <b> -t <tracefile>\n";
+
+int verbose = 0; //verbose flag 
+int s;  //number of set index bits 
+int E;  //number of lines per set
+int b;  //number of block bits
+FILE* fp = NULL;
+Cache cache;
+
+int hits = 0;
+int misses = 0;
+int evictions = 0;
+
+void parseArgument(int argc, char* argv[]);
+int visitCache(uint64_t address);
+int simulate();
+
+int main(int argc, char* argv[])
+{
+    parseArgument(argc, argv);
+    simulate();
+    printSummary(hits, misses, evictions);
+    return 0;
+}
+
+void parseArgument(int argc, char* argv[])
+{
+    int opt;
+    while ((opt = getopt(argc, argv, "hvs:E:b:t:")) != -1)
+    {
+        switch(opt)
+        {
+            case 'h':
+                fprintf(stdout, usage, argv[0]);
+                exit(1);
+            case 'v':
+                verbose = 1;
+                break;
+            case 's':
+                s = atoi(optarg);
+                break;
+            case 'E':
+                E = atoi(optarg);
+                break;
+            case 'b':
+                b = atoi(optarg);
+                break;
+            case 't':
+                fp = fopen(optarg, "r");
+                break;
+            default:
+                fprintf(stdout, usage, argv[0]);
+                exit(1);
+        }
+    }
+}
+
+int simulate()
+{
+    int S = pow(2, s);
+    cache = (Cache)malloc(sizeof(cacheSet) * S);
+    if (cache == NULL) return -1;
+    for (int i = 0; i < S; i++)
+    {
+        cache[i] = (cacheSet)calloc(E, sizeof(cacheLine));
+        if (cache[i] == NULL) return -1;
+    }
+
+    char buf[20];
+    char operation;
+    uint64_t address;
+    int size;
+
+    while (fgets(buf, sizeof(buf), fp) != NULL)
+    {
+        int ret;
+
+        if (buf[0] == 'I') //ignore instruction cache accesses
+        {
+            continue;
+        }
+        else
+        {
+            sscanf(buf, " %c %lx,%d", &operation, &address, &size);
+
+            switch (operation)
+            {
+                case 'S':
+                    ret = visitCache(address);
+                    break;
+                case 'L':
+                    ret = visitCache(address);
+                    break;
+                case 'M':
+                    ret = visitCache(address);
+                    hits++;
+                    break;
+            }
+
+            if (verbose)
+            {
+                switch(ret)
+                {
+                    case 0:
+                        printf("%c %lx,%d hit\n", operation, address, size);
+                        break;
+                    case 1:
+                        printf("%c %lx,%d miss\n", operation, address, size);
+                        break;
+                    case 2:
+                        printf("%c %lx,%d miss eviction\n", operation, address, size);
+                        break;
+                }
+            }
+        }
+    }
+
+    for (int i = 0; i < S; i++)
+        free(cache[i]);
+    free(cache);
+    fclose(fp);
+    return 0;
+}
+
+/*return value
+      0             cache hit
+      1             cache miss
+      2             cache miss, eviction
+*/
+int visitCache(uint64_t address)
+{
+    uint64_t tag = address >> (s + b);
+    unsigned int setIndex = address >> b & ((1 << s) - 1);
+
+    int evict = 0;
+    int empty = -1;
+    cacheSet cacheset = cache[setIndex];
+
+    for (int i = 0; i < E; i++)
+    {
+        if (cacheset[i].valid)
+        {
+            if (cacheset[i].tag == tag)
+            {
+                hits++;
+                cacheset[i].lru = 1;
+                return 0;
+            }
+            
+            cacheset[i].lru++;
+            if (cacheset[evict].lru <= cacheset[i].lru) // =是必须的,why?
+            {
+                evict = i;
+            }
+        }
+        else
+        {
+            empty = i;
+        }
+    }
+
+    //cache miss
+    misses++;
+
+    if (empty != -1)
+    {
+        cacheset[empty].valid = 1;
+        cacheset[empty].tag = tag;
+        cacheset[empty].lru = 1;
+        return 1;
+    }
+    else
+    {
+        cacheset[evict].tag = tag;
+        cacheset[evict].lru = 1;
+        evictions++;
+        return 2;
+    }
+}
+```
+
+## 4. Part B
+
+Part B中要求我们在trans.c中写一个矩阵转置函数，要求Cache miss的次数越少越好。
+
+判分程序最终会检查矩阵转置函数在以下三种大小的矩阵上的表现：
+
+* 32 * 32，miss<300得8分，miss>600不得分
+* 64 * 64，miss<1300得8分，miss>2000不得分
+* 61 * 67，miss<2000得10分，miss>3000不得分
+
+在PartB中提供得Cache规格：S = 5， E = 1, b = 5。即，直接映射Cache，有32组，每行能放32个字节(8个int) 
+
+PartB中在使用`test-trans`程序测试时可能会出现错误，需要安装`valgrind`。
+
+```shell
+$ apt install valgrind
+```
+
+### 4.1. 32 * 32
+
+由于Cache的一行可以存8个int，我们假设矩阵M的第一个元素存放在Cache的第一行（N与M对Cache映射情况完全相同)，绘制矩阵中元素与Cache映射关系如下。可以看到32 * 32矩阵的8行刚好可以把Cache完全占满。所以使用分块技术，每次处理一个8*8的小矩阵。
+
+![YX2nfO.png](https://s1.ax1x.com/2020/05/22/YX2nfO.png)
+
+每个小矩阵的处理次序如下图所示。
+
+![YXhWI1.png](https://s1.ax1x.com/2020/05/22/YXhWI1.png)
+
+代码：
+
+```c
+if (M == 32)
+{
+    int i, j, k;
+    int t0, t1, t2, t3, t4, t5, t6, t7;
+    for (i = 0; i < N; i+=8)
+    {
+        for (j = 0; j < M; j+=8)
+        {
+            for (k = i; k < i+8; k++) 
+            {
+                t0 = A[k][j];
+                t1 = A[k][j+1];
+                t2 = A[k][j+2];
+                t3 = A[k][j+3];
+                t4 = A[k][j+4];
+                t5 = A[k][j+5];
+                t6 = A[k][j+6];
+                t7 = A[k][j+7];
+
+                B[j][k] = t0;
+                B[j+1][k] = t1;
+                B[j+2][k] = t2;
+                B[j+3][k] = t3;
+                B[j+4][k] = t4;
+                B[j+5][k] = t5;
+                B[j+6][k] = t6;
+                B[j+7][k] = t7;
+            }
+        }
+    }
+}
+```
+
+Q1：为什么要分为8*8小块来处理？分成4\*4或者16\*16不行吗？
+
+由于实验允许我们使用12个临时变量，所以除了循环变量之外，我们还剩下8~9个额外的临时变量。利用8个临时变量，我们可以一次性读出A矩阵的8个int值，这里读第一个int时cache miss，后面7个都命中。**影响cache使用效率的主要是对B矩阵的写操作**。如果使用8*8的小块，那么32\*32矩阵的前8行都可以放入cache中，这样虽然我们写B矩阵时是每次写一列，但是相当于我们都在写cache(发生了write hit)，这样就大大提升了写的效率。
+
+如果使用4*4的小方块，那么相当于有一半cache是没有利用的。
+
+如果使用16*16的小方块，一方面我们没有足够的临时变量存放16个A中的元素，另一方面在写B的一列16个元素时，前0~8个元素和后9~15个元素分别映射到同一行，这样会导致write miss，然后发生替换，下次还是wirte miss，造成抖动的现象。
+
+Q2：为什么第三个循环内部这样写？感觉很蠢。
+
+一个直观的想法是：
+
+```c
+for (i = 0; i < N; i+=8)
+{
+    for (j = 0; j < M; j+=8)
+    {
+        for (k = i; k < i+8; k++) 
+        {
+            for (l = j; l < j+8; l++)
+            {
+                B[l][k] = A[k][l];
+            }
+        }
+    }
+}
+```
+
+这种写法存在的问题：A矩阵对角线（从左上到右下）上的元素与B矩阵对角线上的元素映射到cache的同一行，这样在写B时会将cache中的A的一行刷掉，而读A下一个元素时需要再次将这一行读入cache中，这样就造成了confilct miss。
+
+### 4.2. 64 * 64
+
+在有了32*32的经验后，首先想到的方法也是类似于32\*32那样进行分块。如果进行8\*8分块的话，由于矩阵一行有64个int，所以矩阵的4行就能把cache占满，这样8\*8的小分块中第0，1，2，3行就和4，5，6，7行映射到了同一个cache行上，在写B时会造成conflict miss。
+
+![YjPvYq.png](https://s1.ax1x.com/2020/05/22/YjPvYq.png)
+
+既然8*8不行，矩阵4行就能占满cache，一个直观的想法是将分块的大小缩小为4\*4看一下效果。
+
+```c
+for (i = 0; i < N; i+=4)
+{
+    for (j = 0; j < M; j+=4)
+    {
+        for (k = i; k < i + 4; k++)
+        {
+            v0 = A[k][j];
+            v1 = A[k][j+1];
+            v2 = A[k][j+2];
+            v3 = A[k][j+3];
+            B[j][k] = v0;
+            B[j+1][k] = v1;
+            B[j+2][k] = v2;
+            B[j+3][k] = v3;
+        }
+
+    }
+}
+```
+
+下面是实验结果：
+
+```
+➜  cachelab-handout git:(master) ✗ ./test-trans -N 64 -M 64
+
+Function 0 (2 total)
+Step 1: Validating and generating memory traces
+Step 2: Evaluating performance (s=5, E=1, b=5)
+func 0 (Transpose submission): hits:6498, misses:1699, evictions:1667
+
+Function 1 (2 total)
+Step 1: Validating and generating memory traces
+Step 2: Evaluating performance (s=5, E=1, b=5)
+func 1 (Simple row-wise scan transpose): hits:3474, misses:4723, evictions:4691
+
+Summary for official submission (func 0): correctness=1 misses=1699
+
+TEST_TRANS_RESULTS=1:1699
+```
+
+可以看到，miss数为1699，没有达到满分1300的要求，还需要继续优化。我放弃了/(ㄒoㄒ)/~~感觉有点难。
+
+### 4.3. 61 * 67
+
+因为满分要求比较宽松miss < 2000即可，所以尝试使用简单分块技术，可以发现16*16分块即可达到满分。
+
+```c
+for (i = 0; i < N; i+=16)
+{
+    for (j = 0; j < M; j+=16)
+    {
+        for (k = i; k < i + 16 && k < N; k++)
+        {
+            for (l = j; l < j + 16 && l < M; l++)
+            {
+                B[l][k] = A[k][l];
+            }
+        }
+    }
+}
+```
+
+全部完成后可以使用`driver.py`来测试，下面是我的测试结果，除了64*64其他都是满分。
+
+```
+➜  cachelab-handout git:(master) ✗ ./driver.py             
+Part A: Testing cache simulator
+Running ./test-csim
+                        Your simulator     Reference simulator
+Points (s,E,b)    Hits  Misses  Evicts    Hits  Misses  Evicts
+     3 (1,1,1)       9       8       6       9       8       6  traces/yi2.trace
+     3 (4,2,4)       4       5       2       4       5       2  traces/yi.trace
+     3 (2,1,4)       2       3       1       2       3       1  traces/dave.trace
+     3 (2,1,3)     167      71      67     167      71      67  traces/trans.trace
+     3 (2,2,3)     201      37      29     201      37      29  traces/trans.trace
+     3 (2,4,3)     212      26      10     212      26      10  traces/trans.trace
+     3 (5,1,5)     231       7       0     231       7       0  traces/trans.trace
+     6 (5,1,5)  265189   21775   21743  265189   21775   21743  traces/long.trace
+    27
+
+
+Part B: Testing transpose function
+Running ./test-trans -M 32 -N 32
+Running ./test-trans -M 64 -N 64
+Running ./test-trans -M 61 -N 67
+
+Cache Lab summary:
+                        Points   Max pts      Misses
+Csim correctness          27.0        27
+Trans perf 32x32           8.0         8         287
+Trans perf 64x64           3.4         8        1699
+Trans perf 61x67          10.0        10        1992
+          Total points    48.4        53
+```
+
+## 5. 参考资料
+
+[The Memory Hierarchy](http://www.cs.cmu.edu/afs/cs/academic/class/15213-f19/www/lectures/10-memory-hierarchy.pptx)
+
+[ Cache Memories ](http://www.cs.cmu.edu/afs/cs/academic/class/15213-f19/www/lectures/11-cache-memories.pptx)
+
+[CSAPP CacheLab (CMU)](https://kylinchen.top/2019/05/26/Cache/)
+
+[CS:APP3e 深入理解计算机系统_3e CacheLab实验](https://www.cnblogs.com/liqiuhao/p/8026100.html)

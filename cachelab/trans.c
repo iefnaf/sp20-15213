@@ -21,8 +21,81 @@ int is_transpose(int M, int N, int A[N][M], int B[M][N]);
  */
 char transpose_submit_desc[] = "Transpose submission";
 void transpose_submit(int M, int N, int A[N][M], int B[M][N])
-{
-     
+{   
+    if (M == 32)
+    {
+        int i, j, k;
+        int t0, t1, t2, t3, t4, t5, t6, t7;
+        for (i = 0; i < N; i+=8)
+        {
+            for (j = 0; j < M; j+=8)
+            {
+                for (k = i; k < i+8; k++)
+                {
+                    t0 = A[k][j];
+                    t1 = A[k][j+1];
+                    t2 = A[k][j+2];
+                    t3 = A[k][j+3];
+                    t4 = A[k][j+4];
+                    t5 = A[k][j+5];
+                    t6 = A[k][j+6];
+                    t7 = A[k][j+7];
+
+                    B[j][k] = t0;
+                    B[j+1][k] = t1;
+                    B[j+2][k] = t2;
+                    B[j+3][k] = t3;
+                    B[j+4][k] = t4;
+                    B[j+5][k] = t5;
+                    B[j+6][k] = t6;
+                    B[j+7][k] = t7;
+                }
+            }
+        }
+    }
+    else if (M == 61)
+    {
+        int i, j, k, l;
+
+        for (i = 0; i < N; i+=16)
+        {
+            for (j = 0; j < M; j+=16)
+            {
+                for (k = i; k < i + 16 && k < N; k++)
+                {
+                    for (l = j; l < j + 16 && l < M; l++)
+                    {
+                        B[l][k] = A[k][l];
+                    }
+                    
+                }
+            }
+        }
+    }
+    else if (M == 64)
+    {
+        int i, j, k;
+        int v0, v1, v2, v3;
+        for (i = 0; i < N; i+=4)
+        {
+            for (j = 0; j < M; j+=4)
+            {
+                for (k = i; k < i + 4; k++)
+                {
+                    v0 = A[k][j];
+                    v1 = A[k][j+1];
+                    v2 = A[k][j+2];
+                    v3 = A[k][j+3];
+                    B[j][k] = v0;
+                    B[j+1][k] = v1;
+                    B[j+2][k] = v2;
+                    B[j+3][k] = v3;
+                }
+                
+            }
+        }
+    }
+
 }
 
 /* 

@@ -1,161 +1,197 @@
-/*
-1.如果出现跨cacheLine如何解决？
-  比如，0x1100，定位到cacheLine，但是要求的字节超过了该cacheline的最后一个字节
-  出现跨块的情况
-2.如何设计数据结构?
-3.如何malloc一块内存作为cache?如何对该块内存进行便捷的操作?
-4.c语言如何进行文件io?
-5.命令行参数的解析方法
-6.lru算法
-*/
-
 #include "cachelab.h"
 #include <getopt.h>
 #include <stdlib.h>
-#include <stdio.h>
 #include <unistd.h>
-#include <string.h>
+#include <stdio.h>
+#include <math.h>
 
-typedef struct
-{
-    int tag;   //int 是否足够？
+typedef unsigned long int uint64_t;
+
+typedef struct {
     int valid;
-    int lastUsedTime;    //lru replacement algs   
-}CacheLine;
+    int lru;
+    uint64_t tag;
+}cacheLine;
 
-int s = -1, E = -1, b = -1, verbose = 0;
+typedef cacheLine* cacheSet;
+typedef cacheSet* Cache;
 
-int hit = 0, miss = 0, eviction = 0;
+const char* usage = "Usage: %s [-hv] -s <s> -E <E> -b <b> -t <tracefile>\n";
 
-int overAllTime = 0; //used for lru
+int verbose = 0; //verbose flag 
+int s;  //number of set index bits 
+int E;  //number of lines per set
+int b;  //number of block bits
+FILE* fp = NULL;
+Cache cache;
 
-CacheLine* cachePool;
+int hits = 0;
+int misses = 0;
+int evictions = 0;
 
+void parseArgument(int argc, char* argv[]);
+int visitCache(uint64_t address);
+int simulate();
 
-void displayHelp()
+int main(int argc, char* argv[])
 {
-    return;
-
+    parseArgument(argc, argv);
+    simulate();
+    printSummary(hits, misses, evictions);
+    return 0;
 }
 
-void visitCache(long address)
-{
-    int tag = address >> (b + s);
-    unsigned cacheIndex = address >> b & ((1 << s) - 1);
-
-    CacheLine* cacheRow = cachePool + E * cacheIndex;
-    CacheLine* victim = cacheRow;
-
-    for (int i = 0; i < E; i++)
-    {
-        if (!cacheRow[i].valid)     // compulsory miss
-        {
-            ++miss;
-            cacheRow[i].valid = 1;
-            cacheRow[i].lastUsedTime = overAllTime;
-            cacheRow[i].tag = tag;
-            return;
-        }
-
-        if (cacheRow[i].valid && cacheRow[i].tag == tag)       // hit
-        {
-            cacheRow[i].lastUsedTime = overAllTime;
-            ++hit;
-            return;
-        }
-
-        if (cacheRow[i].lastUsedTime < victim->lastUsedTime)
-        {
-            victim = cacheRow + i;
-        }
-    }
-
-    // capacity miss
-    ++miss;
-    ++eviction;
-    victim->lastUsedTime = overAllTime;
-    victim->tag = tag;
-}
-
-
-int main(int argc, char *argv[])
+void parseArgument(int argc, char* argv[])
 {
     int opt;
-    FILE* tracefile;
-
     while ((opt = getopt(argc, argv, "hvs:E:b:t:")) != -1)
     {
         switch(opt)
         {
-            case 's':
-                s = atoi(optarg);
-                break;
-            
-            case 'E':
-                E = atoi(optarg);
-                break;
-            
-            case 'b':
-                b = atoi(optarg);
-                break;
-            
-            case 't':
-                tracefile = fopen(optarg, "r");
-                break;
-            
+            case 'h':
+                fprintf(stdout, usage, argv[0]);
+                exit(1);
             case 'v':
                 verbose = 1;
                 break;
-            
-            case 'h':
-                displayHelp();
-
+            case 's':
+                s = atoi(optarg);
+                break;
+            case 'E':
+                E = atoi(optarg);
+                break;
+            case 'b':
+                b = atoi(optarg);
+                break;
+            case 't':
+                fp = fopen(optarg, "r");
+                break;
             default:
-                displayHelp();
+                fprintf(stdout, usage, argv[0]);
+                exit(1);
         }
     }
+}
 
-    if (s == -1 || E == -1 || b == -1 || tracefile == NULL)
+int simulate()
+{
+    int S = pow(2, s);
+    cache = (Cache)malloc(sizeof(cacheSet) * S);
+    if (cache == NULL) return -1;
+    for (int i = 0; i < S; i++)
     {
-        printf("%s: Missing required command line argument\n", argv[0]);
-		displayHelp();
+        cache[i] = (cacheSet)calloc(E, sizeof(cacheLine));
+        if (cache[i] == NULL) return -1;
     }
 
-    cachePool = (CacheLine*) malloc(sizeof(CacheLine) * E * (1 << s));
-    memset(cachePool, 0, sizeof(CacheLine) * E * (1 << s));
-    
+    char buf[20];
     char operation;
-    long address;
+    uint64_t address;
     int size;
 
-    while (fscanf(tracefile, "%s%lx,%d\n", &operation, &address, &size) == 3)
+    while (fgets(buf, sizeof(buf), fp) != NULL)
     {
-        ++overAllTime;
-        
-        switch(operation)
+        int ret;
+
+        if (buf[0] == 'I') //ignore instruction cache accesses
         {
-            case 'M':
-                visitCache(address);
-                ++hit;
-                break;
-            
-            case 'L':
-                visitCache(address);
-                break;
-            
-            case 'S':
-                visitCache(address);
-                break;
-            
-            case 'I':
-                break;
+            continue;
+        }
+        else
+        {
+            sscanf(buf, " %c %lx,%d", &operation, &address, &size);
+
+            switch (operation)
+            {
+                case 'S':
+                    ret = visitCache(address);
+                    break;
+                case 'L':
+                    ret = visitCache(address);
+                    break;
+                case 'M':
+                    ret = visitCache(address);
+                    hits++;
+                    break;
+            }
+
+            if (verbose)
+            {
+                switch(ret)
+                {
+                    case 0:
+                        printf("%c %lx,%d hit\n", operation, address, size);
+                        break;
+                    case 1:
+                        printf("%c %lx,%d miss\n", operation, address, size);
+                        break;
+                    case 2:
+                        printf("%c %lx,%d miss eviction\n", operation, address, size);
+                        break;
+                }
+            }
         }
     }
 
-    fclose(tracefile);
-
-    free(cachePool);
-
-    printSummary(hit, miss, eviction);
+    for (int i = 0; i < S; i++)
+        free(cache[i]);
+    free(cache);
+    fclose(fp);
     return 0;
+}
+
+/*return value
+      0             cache hit
+      1             cache miss
+      2             cache miss, eviction
+*/
+int visitCache(uint64_t address)
+{
+    uint64_t tag = address >> (s + b);
+    unsigned int setIndex = address >> b & ((1 << s) - 1);
+
+    int evict = 0;
+    int empty = -1;
+    cacheSet cacheset = cache[setIndex];
+
+    for (int i = 0; i < E; i++)
+    {
+        if (cacheset[i].valid)
+        {
+            if (cacheset[i].tag == tag)
+            {
+                hits++;
+                cacheset[i].lru = 1;
+                return 0;
+            }
+            
+            cacheset[i].lru++;
+            if (cacheset[evict].lru <= cacheset[i].lru) // =是必须的,why?
+            {
+                evict = i;
+            }
+        }
+        else
+        {
+            empty = i;
+        }
+    }
+
+    //cache miss
+    misses++;
+
+    if (empty != -1)
+    {
+        cacheset[empty].valid = 1;
+        cacheset[empty].tag = tag;
+        cacheset[empty].lru = 1;
+        return 1;
+    }
+    else
+    {
+        cacheset[evict].tag = tag;
+        cacheset[evict].lru = 1;
+        evictions++;
+        return 2;
+    }
 }
