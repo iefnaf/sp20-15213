@@ -65,9 +65,12 @@ team_t team = {
 #define PREV_BLKP(bp) ((char*)(bp) - GET_SIZE((char*)(bp)-DSIZE)) /* given block ptr bp, compute address of prev blocks */
 
 static char* heap_listp;
+static char* pre_listp;
 
 static void* extend_heap(size_t words);
 static void* coalesce(void *bp);
+static void* first_fit(size_t asize);
+static void* next_fit(size_t asize);
 static void* find_fit(size_t asize);
 static void split_block(void* bp, size_t asize);
 static void place(void* bp, size_t asize);
@@ -98,7 +101,10 @@ static void* extend_heap(size_t words)
 }
 
 /*
- * coalesce
+ * coalesce - merge adjacent empty blocks.
+ *            **update the pre_listp if you use next_fit**
+ *            because the block pointed to by pre_listp may be merged with the previous block, 
+ *            if not updated, it will cause overlapping payloads problem.
  */
 static void* coalesce(void *bp)
 {
@@ -107,7 +113,11 @@ static void* coalesce(void *bp)
     size_t size = GET_SIZE(HDRP(bp));
 
     if (prev_alloc && next_alloc)
+    {
+        pre_listp = bp;
         return bp;
+    }
+        
     else if (prev_alloc && !next_alloc)
     {
         size += GET_SIZE(HDRP(NEXT_BLKP(bp)));
@@ -128,14 +138,14 @@ static void* coalesce(void *bp)
         PUT(FTRP(NEXT_BLKP(bp)), PACK(size, 0));
         bp = PREV_BLKP(bp);
     }
-
+    pre_listp = bp;
     return bp;
 }
 
 /*
- * find_fit - use first fit strategy to find an empty block.
+ * first_fit - use first fit strategy to find an empty block.
  */
-static void* find_fit(size_t asize)
+static void* first_fit(size_t asize)
 {
     for (char* bp = heap_listp; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp))
     {
@@ -145,6 +155,36 @@ static void* find_fit(size_t asize)
         }
     }
     return NULL;
+}
+
+/* 
+ *next_fit - use next fit strategy to find an empty block.
+ */
+static void* next_fit(size_t asize)
+{
+    for (char* bp = pre_listp; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp))
+    {
+        if (!GET_ALLOC(HDRP(bp)) && GET_SIZE(HDRP(bp)) >= asize)
+        {
+            pre_listp = bp;
+            return bp;
+        }
+    }
+
+    for (char* bp = heap_listp; bp != pre_listp; bp = NEXT_BLKP(bp))
+    {
+        if (!GET_ALLOC(HDRP(bp)) && GET_SIZE(HDRP(bp)) >= asize)
+        {
+            pre_listp = bp;
+            return bp;
+        }
+    }
+    return NULL;
+}
+
+static void* find_fit(size_t asize)
+{
+    return next_fit(asize);
 }
 
 /*
@@ -189,6 +229,7 @@ int mm_init(void)
     PUT(heap_listp + (2 * WSIZE), PACK(DSIZE, 1)); //prologue footer
     PUT(heap_listp + (3 * WSIZE), PACK(0, 1)); //epilogue header
     heap_listp += (2 * WSIZE);
+    pre_listp = heap_listp;
 
     if (extend_heap(CHUNKSIZE/WSIZE) == NULL)
         return -1;
