@@ -1,22 +1,8 @@
 /*
  * mm-naive.c - The fastest, least memory-efficient malloc package.
  * 
- * v2.0
- * Explicit free lists, first fit strategy
- * 
- *                        Free blocks                   Allocated blocks
- *                     ----------------                -----------------
- *                     .    header    .                .     header    .
- *    prev->next-->    .    next      .                .     payload   .
- *                     .    prev      .                .               .
- *                     .              .                .               .
- *                     .              .                .               .
- *                     .              .                .               .
- *                     .    footer    .                .     footer    .
- *                     ----------------                -----------------
- *
- *      the next | prev pointer points to the next | prev free block's next field(the word after the header).
- * 
+ * v3.0
+ * segragated free lists, best fit strategy
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -78,71 +64,96 @@ team_t team = {
 #define GET_NEXT(p) (*((unsigned int *)(p)+1))
 #define SET_NEXT(p, val) (*((unsigned int *)(p)+1) = (val))
 
-static char* heap_listp;
-static char* free_list_head;
+static char* heap_listp = NULL;
+static char* block_list_start = NULL;
 
+void* get_freelisthead(size_t size);
+static void remove_from_free_list(void *bp);
+static void insert_to_free_list(void* bp);
 static void* extend_heap(size_t words);
 static void* coalesce(void *bp);
-static void* first_fit(size_t asize);
 static void* find_fit(size_t asize);
 static void place(void* bp, size_t asize);
-int mm_init(void);
-void *mm_malloc(size_t size);
-void mm_free(void *bp);
-void *mm_realloc(void *ptr, size_t size);
 
 /*
- * remove_from_free_list - remove the block from free list
- * if there is only one block, set free_list_head = NULL
+* get_freelisthead - get the free list's head pointer fit the given size.
+*/
+void* get_freelisthead(size_t size)
+{
+    int i = 0;
+    if (size <= 32) i=0;
+    else if (size <= 64) i=1;
+    else if (size <= 128) i=2;
+    else if (size <= 256) i=3;
+    else if (size <= 512) i=4;
+    else if (size <= 1024) i=5;
+    else if (size <= 2048) i=6;
+    else if (size <= 4096) i=7;
+    else  i=8;
+    
+    return block_list_start+(i*WSIZE);
+}
+
+/*
+ * remove_from_free_list - remove the block from free list.
  */ 
 static void remove_from_free_list(void *bp)
 {
     if (bp == NULL || GET_ALLOC(HDRP(bp)))
         return;
-    
+    void *root = get_freelisthead(GET_SIZE(HDRP(bp))); 
     void* prev = GET_PREV(bp);
     void* next = GET_NEXT(bp);
 
-    SET_PREV(bp, 0);
-    SET_NEXT(bp, 0);
+    SET_PREV(bp, NULL);
+    SET_NEXT(bp, NULL);
 
-    if (prev == NULL && next == NULL)
+    if (prev == NULL)
     {
-        free_list_head = NULL;
-    }
-    else if (prev == NULL)
-    {
-        SET_PREV(next, 0);
-        free_list_head = next;
-    }
-    else if (next == NULL)
-    {
-        SET_NEXT(prev, 0);
+        if (next != NULL) SET_PREV(next, NULL);
+        PUT(root, next);
     }
     else
     {
+        if (next != NULL) SET_PREV(next, prev);
         SET_NEXT(prev, next);
-        SET_PREV(next, prev);
-    } 
+    }
 }
 
 /* 
- * insert_to_free_list - insert block bp at the head of the free list
+ * insert_to_free_list - insert block bp into segragated free list.
+*	In each category the free list is ordered by the free size for small to big.
+*   When find a fit free block ,just find for begin to end ,the first fit one is the best fit one.
  */
 static void insert_to_free_list(void* bp)
 {
     if (bp == NULL)
         return;
-    
-    if (free_list_head == NULL)
+    void* root = get_freelisthead(GET_SIZE(HDRP(bp)));
+    void* prev = root;
+    void* next = GET(root);
+
+    while (next != NULL)
     {
-        free_list_head = bp;
-        return;
+        if (GET_SIZE(HDRP(next)) >= GET_SIZE(HDRP(bp))) break;
+        prev = next;
+        next = GET_NEXT(next);
     }
-    
-    SET_NEXT(bp, free_list_head);
-    SET_PREV(free_list_head, bp);
-    free_list_head = bp;
+
+    if (prev == root)
+    {
+        PUT(root, bp);
+        SET_PREV(bp, NULL);
+        SET_NEXT(bp, next);
+        if (next != NULL) SET_PREV(next, bp);
+    }
+    else
+    {
+        SET_PREV(bp, prev);
+        SET_NEXT(bp, next);
+        SET_NEXT(prev, bp);
+        if (next != NULL) SET_PREV(next, bp);
+    }
 }
 
 /*
@@ -171,7 +182,6 @@ static void* extend_heap(size_t words)
 
 /*
  * coalesce - merge adjacent empty blocks.
- * 
  */
 static void* coalesce(void *bp)
 {
@@ -216,24 +226,18 @@ static void* coalesce(void *bp)
     return bp;
 }
 
-/*
- * first_fit - use first fit strategy to find an empty block.
- */
-static void* first_fit(size_t asize)
+static void* find_fit(size_t asize)
 {
-    for (void* bp = free_list_head; bp != 0; bp = GET_NEXT(bp))
+    for (void* root = get_freelisthead(asize); root != (heap_listp-WSIZE); root+=WSIZE)
     {
-        if (GET_SIZE(HDRP(bp)) >= asize)
+        void* bp = GET(root);
+        while (bp)
         {
-            return bp;
+            if (GET_SIZE(HDRP(bp)) >= asize) return bp;
+            bp = GET_NEXT(bp);
         }
     }
     return NULL;
-}
-
-static void* find_fit(size_t asize)
-{
-    return first_fit(asize);
 }
 
 /*
@@ -268,15 +272,24 @@ static void place(void* bp, size_t asize)
  */
 int mm_init(void)
 {
-    if ((heap_listp = mem_sbrk(4*WSIZE)) == (void*)-1)
+    if ((heap_listp = mem_sbrk(12*WSIZE)) == (void*)-1)
         return -1;
-    PUT(heap_listp, 0); // alignment padding
-    PUT(heap_listp + (1 * WSIZE), PACK(DSIZE, 1)); //prologue header
-    PUT(heap_listp + (2 * WSIZE), PACK(DSIZE, 1)); //prologue footer
-    PUT(heap_listp + (3 * WSIZE), PACK(0, 1)); //epilogue header
-    heap_listp += (2 * WSIZE);
-    free_list_head = NULL;
-
+    PUT(heap_listp, 0);           //block size <= 32   
+    PUT(heap_listp+(1*WSIZE), 0); //block size <= 64
+    PUT(heap_listp+(2*WSIZE), 0); //block size <= 128
+    PUT(heap_listp+(3*WSIZE), 0); //block size <= 256
+    PUT(heap_listp+(4*WSIZE), 0); //block size <= 512
+    PUT(heap_listp+(5*WSIZE), 0); //block size <= 1024
+    PUT(heap_listp+(6*WSIZE), 0); //block size <= 2048
+    PUT(heap_listp+(7*WSIZE), 0); //block size <= 4096
+    PUT(heap_listp+(8*WSIZE), 0); //block size > 4096
+    PUT(heap_listp+(9*WSIZE), PACK(DSIZE, 1)); //prologue header
+    PUT(heap_listp+(10*WSIZE), PACK(DSIZE, 1)); //prologue footer
+    PUT(heap_listp+(11*WSIZE), PACK(0, 1)); //epilogue header
+    
+    block_list_start = heap_listp;
+    heap_listp += (10 * WSIZE);
+    
     if (extend_heap(CHUNKSIZE/WSIZE) == NULL)
         return -1;
     return 0;
